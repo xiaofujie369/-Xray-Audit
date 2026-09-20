@@ -840,6 +840,13 @@ class ReportTrafficTests(unittest.TestCase):
             self.assertEqual(scoped, {"3047": {42: ["5.6.7.8"]}})
             self.assertEqual(legacy, {})
 
+    def test_alive_uses_ipv6_source_not_ipv4_destination(self):
+        line = "2026/09/19 10:00:00 from tcp:[2001:db8::1]:2345 accepted tcp:8.8.8.8:443 [vless-3 -> direct] email: 3:7"
+        scoped, legacy = xboard_report.parse_alive_from_access_lines([line])
+        self.assertEqual(scoped, {"3": {7: ["2001:db8::1"]}})
+        self.assertEqual(legacy, {})
+
+
     def test_refresh_online_cache_keeps_recent_alive_users(self):
         with tempfile.TemporaryDirectory() as tmp:
             state_path = Path(tmp) / "state.json"

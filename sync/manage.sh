@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-REPO="xiaofujie369/xboard-xray-docker-sync"
+REPO="xiaofujie369/-Xray-Audit"
 BRANCH="main"
 RAW_BASE="https://raw.githubusercontent.com/${REPO}/${BRANCH}"
 
@@ -54,7 +54,11 @@ ensure_runtime_dirs() {
 
 run_remote_script() {
   local script="$1"
-  bash <(curl -fsSL "${RAW_BASE}/${script}")
+  if [ -f "$SYNC_DIR/release/$script" ]; then
+    bash "$SYNC_DIR/release/$script"
+  else
+    bash <(curl -fsSL "${RAW_BASE}/${script}")
+  fi
 }
 
 edit_panel_config() {
@@ -426,10 +430,21 @@ main_menu() {
 16. 备份当前配置
 17. 恢复上一次配置
 
+20. Audit 状态
+21. 启用 Audit Agent
+22. 停用 Audit Agent（保留数据）
+23. 注册 Audit Agent
+24. 编辑 Audit 设置
+25. 查看 Audit 日志
+26. 查看 spool
+27. 强制上传
+28. 测试中央连接
+29. Audit 诊断
+
 q. 退出
 MENU
     echo
-    read -rp "请输入选择 [0-17/q]: " choice
+    read -rp "请输入选择 [0-17/20-29/q]: " choice
     case "$choice" in
       0) edit_panel_config; pause ;;
       1) install_stack; pause ;;
@@ -449,6 +464,15 @@ MENU
       15) show_config; pause ;;
       16) backup_current_config; pause ;;
       17) restore_latest_config; pause ;;
+      20|26) PYTHONPATH=/opt/xray-audit/code python3 -m agent.manage status; pause ;;
+      21) if [ -f /opt/xray-audit/config.json ]; then systemctl enable --now xboard-audit; else run_remote_script install-audit-agent.sh; fi; pause ;;
+      22) systemctl disable --now xboard-audit xboard-audit-health.timer; pause ;;
+      23) PYTHONPATH=/opt/xray-audit/code python3 -m agent.manage enroll && systemctl restart xboard-audit; pause ;;
+      24) "${EDITOR:-nano}" /opt/xray-audit/config.json; chmod 600 /opt/xray-audit/config.json; chown xray-audit:xray-audit /opt/xray-audit/config.json; systemctl restart xboard-audit; pause ;;
+      25) journalctl -u xboard-audit -n 100 --no-pager; pause ;;
+      27) PYTHONPATH=/opt/xray-audit/code python3 -m agent.manage upload; pause ;;
+      28) PYTHONPATH=/opt/xray-audit/code python3 -m agent.manage test; pause ;;
+      29) PYTHONPATH=/opt/xray-audit/code python3 -m agent.manage diagnostics; pause ;;
       q|Q) exit 0 ;;
       *) warn "无效选择"; pause ;;
     esac

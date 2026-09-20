@@ -1,0 +1,21 @@
+[Unit]
+Description=Independent mainland/external reachability probe
+After=network-online.target
+
+[Service]
+User=xray-probe
+Group=xray-probe
+Environment=PYTHONPATH=/opt/xray-probe/code
+ExecStart=/usr/bin/python3 -m probe.probe_agent
+Restart=always
+RestartSec=10
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/opt/xray-probe
+MemoryMax=128M
+
+[Install]
+WantedBy=multi-user.target

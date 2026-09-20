@@ -1,0 +1,15 @@
+{
+  "server": "https://audit.example.com",
+  "id": "SET_BY_ENROLLMENT",
+  "token": "SET_BY_ENROLLMENT",
+  "spool": "/opt/xray-audit/spool.db",
+  "access_log": "/opt/xray/logs/access.log",
+  "aggregation_seconds": 60,
+  "max_bucket_keys": 50000,
+  "batch_max_events": 1000,
+  "batch_max_bytes": 1048576,
+  "spool_max_mb": 512,
+  "spool_retention_hours": 72,
+  "reserve_mb": 128,
+  "upload_interval": 10
+}

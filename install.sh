@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 set -e
 
-REPO="xiaofujie369/xboard-xray-docker-sync"
-BRANCH="main"
+REPO="${REPO:-xiaofujie369/-Xray-Audit}"
+BRANCH="${BRANCH:-main}"
 RAW_BASE="https://raw.githubusercontent.com/${REPO}/${BRANCH}"
+LOCAL_SOURCE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+fetch_file() {
+  if [ -f "$LOCAL_SOURCE/$1" ]; then cp "$LOCAL_SOURCE/$1" "$2";
+  else curl -fsSL "${RAW_BASE}/$1" -o "$2"; fi
+}
 
 XRAY_DIR="/opt/xray"
 SYNC_DIR="/opt/xray-sync"
@@ -15,6 +20,10 @@ echo
 
 if [ "$(id -u)" != "0" ]; then
   echo "Please run as root."
+  exit 1
+fi
+if [ -f "$SYNC_DIR/.env" ]; then
+  echo 'Existing installation detected. Use update.sh to preserve configuration and identity.'
   exit 1
 fi
 
@@ -58,8 +67,9 @@ sysctl --system >/dev/null || true
 echo "[4/9] 创建目录..."
 mkdir -p "$XRAY_DIR/config" "$XRAY_DIR/logs" "$SYNC_DIR"
 touch "$XRAY_DIR/logs/access.log" "$XRAY_DIR/logs/error.log"
-chmod 777 "$XRAY_DIR/logs"
-chmod 666 "$XRAY_DIR/logs/access.log" "$XRAY_DIR/logs/error.log"
+chown 65532:0 "$XRAY_DIR/logs" "$XRAY_DIR/logs/access.log" "$XRAY_DIR/logs/error.log"
+chmod 750 "$XRAY_DIR/logs"
+chmod 640 "$XRAY_DIR/logs/access.log" "$XRAY_DIR/logs/error.log"
 
 echo "[5/9] 写入 Xray docker-compose.yml..."
 cat > "$XRAY_DIR/docker-compose.yml" <<'EOC'
@@ -93,10 +103,18 @@ cat > "$XRAY_DIR/config/config.json" <<'EOC'
 EOC
 
 echo "[7/9] 下载同步脚本..."
-curl -fsSL "${RAW_BASE}/sync/xboard_sync.py" -o "$SYNC_DIR/xboard_sync.py"
-curl -fsSL "${RAW_BASE}/sync/xboard_report.py" -o "$SYNC_DIR/xboard_report.py"
-curl -fsSL "${RAW_BASE}/sync/healthcheck.sh" -o "$SYNC_DIR/healthcheck.sh"
-curl -fsSL "${RAW_BASE}/sync/manage.sh" -o "$SYNC_DIR/manage.sh"
+fetch_file sync/xboard_sync.py "$SYNC_DIR/xboard_sync.py"
+fetch_file sync/xboard_report.py "$SYNC_DIR/xboard_report.py"
+fetch_file sync/audit_bridge.py "$SYNC_DIR/audit_bridge.py"
+fetch_file sync/healthcheck.sh "$SYNC_DIR/healthcheck.sh"
+fetch_file sync/manage.sh "$SYNC_DIR/manage.sh"
+if [ -d "$LOCAL_SOURCE/agent" ]; then
+  mkdir -p "$SYNC_DIR/release/sync" "$SYNC_DIR/release/systemd"
+  cp -a "$LOCAL_SOURCE/agent" "$SYNC_DIR/release/"
+  cp "$LOCAL_SOURCE"/*.sh "$SYNC_DIR/release/"
+  cp "$LOCAL_SOURCE/sync/"* "$SYNC_DIR/release/sync/" 2>/dev/null || true
+  cp "$LOCAL_SOURCE/systemd/"* "$SYNC_DIR/release/systemd/"
+fi
 cp "$SYNC_DIR/manage.sh" /usr/local/bin/xray-sync
 cp "$SYNC_DIR/manage.sh" /usr/local/bin/xbr
 chmod +x "$SYNC_DIR/xboard_sync.py" "$SYNC_DIR/xboard_report.py" "$SYNC_DIR/healthcheck.sh" "$SYNC_DIR/manage.sh" /usr/local/bin/xray-sync /usr/local/bin/xbr
@@ -126,8 +144,8 @@ EOFENV
 chmod 600 "$SYNC_DIR/.env"
 
 echo "[8/9] 写入 systemd 服务..."
-curl -fsSL "${RAW_BASE}/systemd/xboard-sync.service" -o /etc/systemd/system/xboard-sync.service
-curl -fsSL "${RAW_BASE}/systemd/xboard-report.service" -o /etc/systemd/system/xboard-report.service
+fetch_file systemd/xboard-sync.service /etc/systemd/system/xboard-sync.service
+fetch_file systemd/xboard-report.service /etc/systemd/system/xboard-report.service
 
 systemctl daemon-reload
 systemctl enable xboard-sync xboard-report

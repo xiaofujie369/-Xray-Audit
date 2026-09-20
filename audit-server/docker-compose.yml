@@ -1,0 +1,93 @@
+name: xboard-audit
+x-backend: &backend
+  build:
+    context: ..
+    dockerfile: audit-server/backend/Dockerfile
+  env_file: .env
+  restart: unless-stopped
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: [ALL]
+  read_only: true
+  tmpfs: [/tmp]
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+services:
+  audit-edge:
+    image: caddy:2-alpine
+    profiles: [https]
+    restart: unless-stopped
+    environment:
+      PUBLIC_URL: ${PUBLIC_URL:-https://audit.example.com}
+    ports: ["80:80", "443:443", "443:443/udp"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    depends_on: [audit-web]
+  audit-migrate:
+    <<: *backend
+    restart: "no"
+    command: ["alembic", "upgrade", "head"]
+  audit-api:
+    <<: *backend
+    depends_on:
+      audit-migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/readyz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+  audit-worker:
+    <<: *backend
+    command: ["celery", "-A", "app.worker:celery", "worker", "--loglevel=WARNING", "--concurrency=2"]
+    depends_on:
+      audit-migrate:
+        condition: service_completed_successfully
+  audit-scheduler:
+    <<: *backend
+    command: ["celery", "-A", "app.worker:celery", "beat", "--loglevel=WARNING", "--schedule=/tmp/celerybeat"]
+    depends_on:
+      audit-migrate:
+        condition: service_completed_successfully
+  audit-web:
+    build: frontend
+    restart: unless-stopped
+    depends_on: [audit-api]
+    ports: ["127.0.0.1:${AUDIT_WEB_PORT:-8080}:8080"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: audit
+      POSTGRES_USER: audit
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+    volumes: ["postgres:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U audit -d audit"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--maxmemory", "256mb", "--maxmemory-policy", "noeviction"]
+    volumes: ["redis:/data"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+volumes:
+  caddy-data:
+  caddy-config:
+  postgres:
+  redis:

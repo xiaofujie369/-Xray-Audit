@@ -1,0 +1,10 @@
+/opt/xray/logs/access.log /opt/xray/logs/error.log {
+    daily
+    maxsize 100M
+    rotate 5
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}

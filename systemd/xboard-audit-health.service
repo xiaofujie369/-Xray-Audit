@@ -1,0 +1,15 @@
+[Unit]
+Description=Read local Xray container status for audit heartbeat
+
+[Service]
+Type=oneshot
+Environment=PYTHONPATH=/opt/xray-audit/code
+ExecStart=/usr/bin/python3 -m agent.host_health
+UMask=0027
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/opt/xray-audit
+TimeoutStartSec=15
+MemoryMax=64M

@@ -1,32 +1,79 @@
 name: CI
-
 on:
   pull_request:
   push:
-    branches:
-      - main
-
+    branches: [main, 'codex/**']
+permissions:
+  contents: read
 jobs:
   python:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-
-      - name: Install dependencies
-        run: python -m pip install --upgrade pip requests
-
-      - name: Compile Python scripts
-        run: python -m py_compile sync/xboard_sync.py sync/xboard_report.py
-
-      - name: Run unit tests
-        run: python -m unittest discover -s tests -v
-
-      - name: Validate shell syntax
-        run: bash -n install.sh update.sh uninstall.sh sync/healthcheck.sh sync/manage.sh
+          python-version: '3.12'
+      - run: pip install -r audit-server/backend/requirements.txt requests pytest ruff httpx
+      - run: ruff check agent probe audit-server/backend sync/audit_bridge.py tests/test_audit_agent.py tests/test_audit_server.py tests/test_audit_analysis.py tests/test_xray_runtime.py
+      - run: python -m compileall -q agent probe sync audit-server/backend
+      - name: Official pinned Xray
+        run: |
+          mkdir -p /tmp/xray
+          curl --fail --location https://github.com/XTLS/Xray-core/releases/download/v26.5.9/Xray-linux-64.zip -o /tmp/xray.zip
+          unzip -q /tmp/xray.zip -d /tmp/xray
+          chmod +x /tmp/xray/xray
+      - run: pytest -q
+        env:
+          XRAY_BINARY: /tmp/xray/xray
+      - name: Shell syntax
+        run: find . -name '*.sh' -not -path './.git/*' -print0 | xargs -0 -n1 bash -n
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: audit-server/frontend/package-lock.json
+      - run: npm ci && npm run lint && npm run build
+        working-directory: audit-server/frontend
+  compose:
+    runs-on: ubuntu-latest
+    env:
+      COMPOSE_PROJECT_NAME: xboard-audit-validation-ci
+      AUDIT_SMOKE_URL: http://127.0.0.1:8080
+      ADMIN_EMAIL: ci@example.test
+      ADMIN_PASSWORD: ci-only-password-123456789
+      PYTHONPATH: .
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compose and container smoke test
+        run: |
+          cp audit-server/.env.example audit-server/.env
+          cat >> audit-server/.env <<'ENV'
+          APP_SECRET=ci-only-secret-not-for-production-123456789
+          ADMIN_EMAIL=ci@example.test
+          ADMIN_PASSWORD=ci-only-password-123456789
+          POSTGRES_PASSWORD=ci-only-database-password
+          DATABASE_URL=postgresql+psycopg://audit:ci-only-database-password@postgres:5432/audit
+          ENV
+          docker compose -f xray/docker-compose.yml config --quiet
+          docker compose -f audit-server/docker-compose.yml config --quiet
+          docker compose -f audit-server/docker-compose.yml build
+          docker build -f probe/Dockerfile -t audit-probe-test .
+          docker compose -f audit-server/docker-compose.yml up -d
+          for attempt in $(seq 1 60); do
+            if docker compose -f audit-server/docker-compose.yml exec -T audit-api python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/readyz')"; then break; fi
+            sleep 2
+          done
+          docker compose -f audit-server/docker-compose.yml exec -T audit-api python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/readyz')"
+          docker compose -f audit-server/docker-compose.yml run --rm audit-migrate
+          curl --fail http://127.0.0.1:8080/ > /dev/null
+          python3 tests/compose_smoke.py --faults --project xboard-audit-validation-ci
+          bash audit-server/backup.sh /tmp/audit-ci-backup
+          printf 'RESTORE\n' | bash audit-server/restore.sh /tmp/audit-ci-backup
+      - if: always()
+        run: docker compose -f audit-server/docker-compose.yml logs --tail=100
+      - if: always()
+        run: docker compose -f audit-server/docker-compose.yml down -v

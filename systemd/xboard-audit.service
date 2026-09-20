@@ -1,0 +1,25 @@
+[Unit]
+Description=Independent Xray audit spool and uploader
+After=network-online.target
+
+[Service]
+Type=simple
+User=xray-audit
+Group=xray-audit
+Environment=PYTHONPATH=/opt/xray-audit/code
+EnvironmentFile=-/opt/xray-audit/.env
+ExecStart=/usr/bin/python3 -m agent.audit_agent
+Restart=always
+RestartSec=10
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/opt/xray-audit
+MemoryMax=128M
+CPUQuota=10%
+TasksMax=16
+
+[Install]
+WantedBy=multi-user.target

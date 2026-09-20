@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import json
+import hashlib
+import ipaddress
 import shutil
 import re
 import subprocess
@@ -12,6 +14,10 @@ import requests
 ENV_PATH = "/opt/xray-sync/.env"
 STATE_PATH = "/opt/xray-sync/report_state.json"
 DEFAULT_ACCESS_LOG = "/opt/xray/logs/access.log"
+
+
+def redact_secrets(value):
+    return re.sub(r"(?i)(token=)[^&\s'\")]+", r"\1***", str(value))
 
 
 def load_env():
@@ -252,15 +258,18 @@ def extract_user_key_from_access_line(line):
 
 
 def extract_ip_from_access_line(line):
-    ipv4 = re.search(r"(?<![\d.])(\d{1,3}(?:\.\d{1,3}){3})(?::\d+)?(?![\d.])", line)
-    if ipv4:
-        return ipv4.group(1)
-
-    ipv6 = re.search(r"\[([0-9a-fA-F:]+)\](?::\d+)?", line)
-    if ipv6:
-        return ipv6.group(1)
-
-    return None
+    # Only the source endpoint immediately before the decision is a client IP.
+    match = re.search(r"(?:^|\s)(?:tcp:|udp:)?(\S+)\s+(?:accepted|rejected)\s", line)
+    if not match:
+        return None
+    host, separator, port = match[1].rpartition(":")
+    if not separator or not port.isdecimal():
+        return None
+    try:
+        address = ipaddress.ip_address(host.strip("[]"))
+        return str(getattr(address, "ipv4_mapped", None) or address)
+    except ValueError:
+        return None
 
 
 def parse_alive_from_access_lines(lines):
@@ -327,20 +336,46 @@ def read_access_log_since(env):
     state = load_state(state_path)
     log_state = state.get("access_log", {})
 
-    size = log_path.stat().st_size
+    stat = log_path.stat()
+    size = stat.st_size
+    identity = [stat.st_dev, stat.st_ino]
     offset = int(log_state.get("offset", 0) or 0)
-    if offset < 0 or offset > size:
+    if offset < 0 or offset > size or log_state.get("identity", identity) != identity:
         offset = 0
 
-    with log_path.open("r", errors="ignore") as f:
+    skipping = log_state.get("skipping_long_line", False) if offset else False
+    with log_path.open("rb") as f:
+        if offset and log_state.get("anchor"):
+            f.seek(max(0, offset - 128))
+            if hashlib.sha256(f.read(min(offset, 128))).hexdigest() != log_state["anchor"]:
+                offset, skipping = 0, False
         f.seek(offset)
-        lines = f.readlines()
+        lines = []
+        for _ in range(100000):
+            position = f.tell()
+            if position - offset >= 8 * 1024 * 1024:
+                break
+            raw = f.readline(16385)
+            if not raw:
+                break
+            if skipping or len(raw) > 16384:
+                skipping = not raw.endswith(b"\n")
+                continue
+            if not raw.endswith(b"\n"):
+                f.seek(position)
+                break
+            lines.append(raw.decode("utf-8", errors="ignore"))
         new_offset = f.tell()
+        f.seek(max(0, new_offset - 128))
+        anchor = hashlib.sha256(f.read(min(new_offset, 128))).hexdigest()
 
     state["access_log"] = {
         "path": str(log_path),
         "offset": new_offset,
         "size": size,
+        "identity": identity,
+        "anchor": anchor,
+        "skipping_long_line": skipping,
     }
     save_state(state_path, state)
 
@@ -579,7 +614,7 @@ def post_report_v2(env, node_id, node_type, traffic, alive, status):
         resp = r.text[:500]
 
     if r.status_code >= 400:
-        raise RuntimeError(f"v2 report failed HTTP {r.status_code}: {resp}")
+        raise RuntimeError(f"v2 report failed HTTP {r.status_code}")
 
     print(
         f"[report] posted v2 report for node {node_id}:{node_type}: "
@@ -605,9 +640,9 @@ def post_traffic(env, node_id, node_type, traffic):
         resp = r.text[:500]
 
     if r.status_code >= 400:
-        raise RuntimeError(f"push failed HTTP {r.status_code}: {resp}")
+        raise RuntimeError(f"push failed HTTP {r.status_code}")
 
-    print(f"[report] pushed traffic for {len(traffic)} users on node {node_id}:{node_type}: {resp}")
+    print(f"[report] pushed traffic for {len(traffic)} users on node {node_id}:{node_type}")
 
 
 def post_alive(env, node_id, node_type, alive):
@@ -628,9 +663,9 @@ def post_alive(env, node_id, node_type, alive):
         resp = r.text[:500]
 
     if r.status_code >= 400:
-        raise RuntimeError(f"alive failed HTTP {r.status_code}: {resp}")
+        raise RuntimeError(f"alive failed HTTP {r.status_code}")
 
-    print(f"[report] pushed alive devices for {len(alive)} users on node {node_id}:{node_type}: {resp}")
+    print(f"[report] pushed alive devices for {len(alive)} users on node {node_id}:{node_type}")
 
 
 def post_status_legacy(env, node_id, node_type, status):
@@ -647,9 +682,9 @@ def post_status_legacy(env, node_id, node_type, status):
         resp = r.text[:500]
 
     if r.status_code >= 400:
-        raise RuntimeError(f"legacy status failed HTTP {r.status_code}: {resp}")
+        raise RuntimeError(f"legacy status failed HTTP {r.status_code}")
 
-    print(f"[report] pushed legacy status for node {node_id}:{node_type}: {resp}")
+    print(f"[report] pushed legacy status for node {node_id}:{node_type}")
 
 
 def post_node_report(env, node_id, node_type, traffic, alive, status):
@@ -660,7 +695,7 @@ def post_node_report(env, node_id, node_type, traffic, alive, status):
         except Exception as e:
             if not parse_bool(env.get("REPORT_V2_FALLBACK", "true"), default=True):
                 raise
-            print(f"[report] v2 report failed for node {node_id}:{node_type}, using legacy fallback: {e}")
+            print(f"[report] v2 report failed for node {node_id}:{node_type}, using legacy fallback: {redact_secrets(e)}")
 
     post_traffic(env, node_id, node_type, traffic)
     post_alive(env, node_id, node_type, alive)
@@ -675,6 +710,13 @@ def main():
     scoped_alive, legacy_alive = read_access_log_since(env)
 
     merge_legacy_map(scoped_traffic, legacy_traffic, nodes, "traffic")
+    # Optional local copy: no network and no second Stats API reset.
+    if Path("/opt/xray-audit/traffic-inbox").is_dir():
+        try:
+            from audit_bridge import copy_interval
+            copy_interval(scoped_traffic)
+        except Exception:
+            pass
     merge_legacy_map(scoped_alive, legacy_alive, nodes, "alive users")
     active_alive = refresh_online_cache(env, scoped_alive, nodes)
     include_alive_users_in_traffic(scoped_traffic, active_alive)
@@ -696,5 +738,5 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        print(f"[report] ERROR: {e}", file=sys.stderr)
+        print(f"[report] ERROR: {redact_secrets(e)}", file=sys.stderr)
         sys.exit(1)

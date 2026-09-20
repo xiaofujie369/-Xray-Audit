@@ -1,0 +1,10 @@
+[Unit]
+Description=Refresh local Xray metadata every five minutes
+
+[Timer]
+OnBootSec=15
+OnUnitActiveSec=300
+Unit=xboard-audit-health.service
+
+[Install]
+WantedBy=timers.target

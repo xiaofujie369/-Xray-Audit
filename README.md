@@ -1,3 +1,98 @@
+# Xray Audit · XBoard 多 VPS 审计与关联分析
+
+当前版本：`2.0.0-dev`。按维护者要求先推送供 VPS 部署验证；最后一批改动尚未完成完整回归，不标记为已通过生产验收。
+
+## 快速部署（Ubuntu / Debian，root）
+
+三种角色：中央管理服务器、运行 Xray 的 VPS Agent、独立大陆 Probe。先部署中央并配置 HTTPS，再注册 Agent 和 Probe。
+
+### 1. 下载项目
+
+```bash
+sudo -i
+apt-get update && apt-get install -y git curl python3 ca-certificates
+git clone https://github.com/xiaofujie369/-Xray-Audit.git /opt/xray-audit-src
+cd /opt/xray-audit-src
+```
+
+中央需要 Docker Engine 与 Compose v2；未安装时可使用 Docker 官方安装器：
+
+```bash
+curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
+sh /tmp/get-docker.sh
+```
+
+### 2. 中央管理服务器
+
+将域名解析到中央服务器，并放行 TCP 80、443。配置向导会生成数据库密码与应用密钥，并提示设置后台账户。
+
+```bash
+cd /opt/xray-audit-src
+python3 audit-server/configure.py
+bash audit-server/install-central.sh --https
+```
+
+打开配置时填写的 HTTPS 地址登录。`--https` 启用 Caddy 自动证书；已有 HTTPS 反向代理时省略该参数，把代理指向 `127.0.0.1:8080`。现有 `.env` 不会被向导覆盖。
+
+### 3. Xray VPS
+
+在每台 VPS 下载同一项目。全新节点运行：
+
+```bash
+cd /opt/xray-audit-src
+bash install.sh
+```
+
+已有旧版 XBoard 同步服务时使用更新，保留原配置：
+
+```bash
+cd /opt/xray-audit-src
+bash update.sh
+```
+
+中央后台「Agent / Probe」选择 VPS Agent，生成一次性令牌，然后在 VPS 执行：
+
+```bash
+bash /opt/xray-audit-src/install-audit-agent.sh
+xbr
+```
+
+按提示输入中央 HTTPS 地址、一次性令牌、名称和区域。`xbr` 的 20–29 项用于 Audit 状态、启停、注册、日志、spool、上传和诊断。Agent 配置在 `/opt/xray-audit/config.json`。
+
+### 4. 独立大陆 Probe
+
+在两台来自不同大陆网络的探测机器下载项目。中央分别生成 Probe 令牌，勾选大陆探测点，并填写不同的独立网络分组。
+
+```bash
+cd /opt/xray-audit-src
+bash probe/install-probe.sh
+systemctl status xboard-probe --no-pager
+```
+
+中央「探测目标」添加 VPS 的公网 IP、端口和协议；「系统设置」配置可靠的 `control_targets`，例如运维人员选定的 `[{"address":"公网IP","port":443}]`。两个凭据来自同一网络时不能视为两个独立探测点。
+
+### 常用操作
+
+```bash
+# 中央状态与日志
+cd /opt/xray-audit-src/audit-server
+docker compose ps
+docker compose logs --tail=100 audit-api audit-worker
+
+# 中央备份（目标必须为尚不存在的目录）
+bash backup.sh /root/audit-backup-$(date +%Y%m%d-%H%M%S)
+
+# VPS 状态
+systemctl status xboard-audit --no-pager
+journalctl -u xboard-audit -n 100 --no-pager
+```
+
+页面中的“关联度”仅描述统计关联，不能证明某用户或网站导致屏蔽。访问日志通常只提供域名或目标 IP 中的一种，系统不伪造另一种或域名流量。
+
+详细说明：[中央部署](docs/audit-central.md)、[Agent](docs/audit-agent.md)、[Probe](docs/audit-probe.md)、[升级](docs/audit-upgrade.md)、[安全](docs/audit-security.md)、[关联计算](docs/audit-correlation.md)、[验证状态](docs/audit-validation.md)。
+
+---
+
 # XBoard Xray Docker Sync
 
 Official xray-core Docker deployment with XBoard panel sync and traffic report.
@@ -57,7 +152,7 @@ For Shadowsocks 2022:
 
 ## Quick Install
 
-bash <(curl -fsSL https://raw.githubusercontent.com/xiaofujie369/xboard-xray-docker-sync/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/xiaofujie369/-Xray-Audit/main/install.sh)
 
 After installation, use the management menu:
 
@@ -65,8 +160,8 @@ xbr
 
 ## Manual Install
 
-git clone https://github.com/xiaofujie369/xboard-xray-docker-sync.git
-cd xboard-xray-docker-sync
+git clone https://github.com/xiaofujie369/-Xray-Audit.git
+cd ./-Xray-Audit
 bash install.sh
 
 ## Node List Format
@@ -137,7 +232,7 @@ journalctl -u xboard-report -n 100 --no-pager
 
 ## Update
 
-cd xboard-xray-docker-sync
+cd ./-Xray-Audit
 git pull
 bash update.sh
 

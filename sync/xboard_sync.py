@@ -1694,9 +1694,19 @@ def ensure_xray_log_files(log_dir="/opt/xray/logs"):
     access_log.touch(exist_ok=True)
     error_log.touch(exist_ok=True)
 
-    p.chmod(0o777)
-    access_log.chmod(0o666)
-    error_log.chmod(0o666)
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        import grp
+        try:
+            gid = grp.getgrnam("xray-audit").gr_gid
+        except KeyError:
+            gid = 0
+        # Official pinned container runs as UID 65532; audit receives read-only
+        # group access without making client metadata readable to every user.
+        for item in (p, access_log, error_log):
+            os.chown(item, 65532, gid)
+    p.chmod(0o750)
+    access_log.chmod(0o640)
+    error_log.chmod(0o640)
 
 
 def validate_xray_config(config):
@@ -1887,6 +1897,16 @@ def fetch_node(
         "custom_dns_servers": panel_dns_servers
     }
 
+def apply_audit_sniffing(inbound, env):
+    """Explicit audit config only; retain legacy config byte-for-byte when disabled."""
+    if not parse_bool(env.get("AUDIT_ENABLED", "false")):
+        return
+    if inbound.get("protocol") not in {"vless", "vmess", "trojan", "shadowsocks"}:
+        return
+    protocols = [name for name in ("http", "tls") if parse_bool(env.get("AUDIT_SNIFF_" + name.upper(), "true"))]
+    inbound["sniffing"] = {"enabled": parse_bool(env.get("AUDIT_SNIFFING_ENABLED", "true")), "destOverride": protocols}
+
+
 def sync_once():
     env = load_env()
 
@@ -1920,6 +1940,7 @@ def sync_once():
             enable_panel_default_dns=enable_panel_default_dns,
         )
         inbound = node_data["inbound"]
+        apply_audit_sniffing(inbound, env)
 
         inbounds.append(inbound)
         custom_outbounds.extend(node_data.get("custom_outbounds", []))

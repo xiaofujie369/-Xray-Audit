@@ -1,6 +1,19 @@
+__pycache__/
+*.py[cod]
+.venv/
 .env
+*.db
+*.db-*
+node_modules/
+dist/
+.pytest_cache/
+.ruff_cache/
+coverage.xml
+.coverage
+artifacts/
 *.env
 .env.*
+!.env.example
 *.log
 logs/
 config.json
@@ -8,6 +21,4 @@ credentials.env
 *.key
 *.pem
 *.crt
-__pycache__/
-*.pyc
 backup/
