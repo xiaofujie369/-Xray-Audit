@@ -20,17 +20,23 @@ from sqlalchemy import String, cast, delete, func, insert, or_, select, text, up
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from . import schemas as S
+from .ai_review import Options as AIOptions
+from .ai_review import configured as ai_configured
+from .ai_review import options as ai_options
+from .baseline import accumulate
 from .db import Session, engine, now, query_lock, query_metrics, session, utc
 from .metrics import increment
 from .models import (
     VPS,
     Admin,
+    AIReport,
     Batch,
     BlockEvent,
     Correlation,
     Enrollment,
     Event,
     Identity,
+    InvestigationSnapshot,
     IPHistory,
     Job,
     LoginSession,
@@ -41,7 +47,7 @@ from .models import (
 )
 from .queries import activity_summary
 from .security import admin, agent, audit, bootstrap, current_user, digest, issue_session, passwords
-from .settings import DEFAULTS, settings
+from .settings import DEFAULTS, control_revision, settings
 
 cache = redis.Redis.from_url(
     os.environ.get("REDIS_URL", "redis://localhost:6379/0"), socket_connect_timeout=0.2, socket_timeout=0.2
@@ -465,9 +471,10 @@ def agent_config(kind: str, identity=Depends(agent), db=Depends(session)):
         return {
             "targets": [row_dict(x) for x in targets],
             "controls": config["control_targets"],
+            "control_revision": control_revision(config["control_targets"]),
             "interval": config["probe_interval_seconds"],
         }
-    return {"schema_versions": [1, 2], "latest_version": "2.0.0", "max_events": 1000}
+    return {"schema_versions": [1, 2], "latest_version": "2.1.0-dev", "max_events": 1000}
 
 
 @app.post("/api/v1/{kind}/{collection}/batch")
@@ -514,6 +521,15 @@ def ingest(kind: str, collection: str, body: S.BatchInput, identity=Depends(agen
         increment(db, "audit_ingest_batches_total")
         if model is Event:
             increment(db, "audit_ingest_events_total", len(rows))
+            accumulate(db, rows)
+            if rows:
+                first = min(row["bucket_start"] for row in rows)
+                last = max(row["bucket_start"] for row in rows)
+                db.execute(update(BlockEvent).where(
+                    BlockEvent.vps_id == identity.vps_id,
+                    BlockEvent.window_end > first,
+                    BlockEvent.window_end <= last + timedelta(days=8),
+                ).values(investigation_dirty=True))
         db.commit()
     except IntegrityError:
         db.rollback()
@@ -999,6 +1015,65 @@ def incident_detail(event_id: str, user=Depends(current_user), db=Depends(sessio
     return result
 
 
+@app.get("/api/v1/block-events/{event_id}/investigation")
+def investigation_detail(event_id: str, snapshot_id: str | None = None, user=Depends(current_user), db=Depends(session)):
+    if db.get(BlockEvent, event_id) is None:
+        raise HTTPException(404, "incident not found")
+    query = select(InvestigationSnapshot).where(InvestigationSnapshot.block_event_id == event_id)
+    if snapshot_id:
+        query = query.where(InvestigationSnapshot.id == snapshot_id)
+    snapshot = db.scalar(query.order_by(InvestigationSnapshot.created_at.desc(), InvestigationSnapshot.id.desc()).limit(1))
+    if snapshot is None:
+        return {"status": "pending", "detail": "Investigation snapshot has not been captured yet."}
+    return {"status": "ready", "id": snapshot.id, "created_at": snapshot.created_at,
+            "content_hash": snapshot.content_hash, "evidence": snapshot.payload}
+
+
+@app.get("/api/v1/ai/settings")
+def ai_configuration(user=Depends(current_user), db=Depends(session)):
+    usage = db.get(Setting, "ai_daily_usage")
+    today = now().date().isoformat()
+    return {"options": ai_options(db).model_dump(), "configured": ai_configured(),
+            "model": os.environ.get("AI_MODEL", ""), "usage_day_utc": today,
+            "requests_today": usage.value.get("requests", 0) if usage and usage.value.get("day") == today else 0,
+            "privacy": "Only pseudonyms, aggregate counts and probe outcomes leave this server. Read-only reports."}
+
+
+@app.patch("/api/v1/ai/settings")
+def change_ai_configuration(body: AIOptions, user=Depends(admin), db=Depends(session)):
+    if body.enabled and not ai_configured():
+        raise HTTPException(422, "Configure HTTPS AI_API_URL, AI_API_KEY and AI_MODEL in the central .env first")
+    db.merge(Setting(key="ai_options", value=body.model_dump()))
+    audit(db, user.email, "change_ai_options", enabled=body.enabled)
+    db.commit()
+    return ai_configuration(user, db)
+
+
+@app.get("/api/v1/block-events/{event_id}/ai-reports")
+def incident_reports(event_id: str, user=Depends(current_user), db=Depends(session)):
+    if db.get(BlockEvent, event_id) is None:
+        raise HTTPException(404, "incident not found")
+    rows = db.scalars(select(AIReport).join(InvestigationSnapshot).where(
+        InvestigationSnapshot.block_event_id == event_id
+    ).order_by(AIReport.created_at.desc()).limit(20)).all()
+    return {"items": [{key: value for key, value in row_dict(row).items() if key != "lease_token"}
+                      for row in rows]}
+
+
+@app.post("/api/v1/ai/reports/{report_id}/retry")
+def retry_ai_report(report_id: str, user=Depends(admin), db=Depends(session)):
+    report = db.scalar(select(AIReport).where(AIReport.id == report_id).with_for_update())
+    if report is None:
+        raise HTTPException(404, "report not found")
+    if report.status != "failed":
+        raise HTTPException(409, "only failed reports can be retried")
+    report.status, report.attempts, report.available_at = "pending", 0, now()
+    report.error_code = None
+    audit(db, user.email, "retry_ai_report", report_id=report_id)
+    db.commit()
+    return {"ok": True}
+
+
 @app.post("/api/v1/block-events/{event_id}/recalculate")
 def recalculate(event_id: str, user=Depends(admin), db=Depends(session)):
     if db.get(BlockEvent, event_id) is None:
@@ -1033,7 +1108,16 @@ def correlations(
         query = query.where(Correlation.block_event_id == event_id)
     if key:
         query = query.where(Correlation.entity_key == key)
-    return page(db, query.order_by(Correlation.score.desc(), Correlation.id.desc()), page_number, size)
+    result = page(db, query.order_by(Correlation.score.desc(), Correlation.id.desc()), page_number, size)
+    incidents = {row.id: row for row in db.scalars(select(BlockEvent).where(
+        BlockEvent.id.in_({item["block_event_id"] for item in result["items"]})
+    ))}
+    for item in result["items"]:
+        incident = incidents.get(item["block_event_id"])
+        if incident:
+            item.update(vps_id=incident.vps_id, incident_state=incident.state,
+                        incident_time=incident.first_known_bad_at)
+    return result
 
 
 @app.get("/api/v1/settings")
@@ -1094,6 +1178,8 @@ def edit_settings(body: dict, user=Depends(admin), db=Depends(session)):
                 raise HTTPException(422, "invalid IANA timezone")
         db.merge(Setting(key=key, value=value))
     audit(db, user.email, "change_settings", keys=list(body))
+    if {"weights", "domain_ignore"} & set(body):
+        db.execute(update(BlockEvent).values(investigation_dirty=True))
     db.commit()
     return settings(db)
 
@@ -1226,7 +1312,11 @@ def system_health(user=Depends(current_user), db=Depends(session)):
         "redis": redis_ok,
         "database_bytes": size,
         "pending_jobs": db.scalar(select(func.count()).select_from(Job)),
-        "version": "2.0.0-dev",
+        "pending_ai_reports": db.scalar(select(func.count()).select_from(AIReport).where(AIReport.status.in_(["pending", "running"]))),
+        "failed_ai_reports": db.scalar(select(func.count()).select_from(AIReport).where(AIReport.status == "failed")),
+        "baseline_backfill": db.get(Setting, "baseline_backfill").value if db.get(Setting, "baseline_backfill") else None,
+        "ai_worker_last_seen": db.get(Setting, "ai_worker_last_seen").value if db.get(Setting, "ai_worker_last_seen") else None,
+        "version": "2.1.0-dev",
         "worker_last_seen": db.get(Setting, "worker_last_seen").value
         if db.get(Setting, "worker_last_seen")
         else None,

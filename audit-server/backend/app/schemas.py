@@ -82,6 +82,7 @@ class ResultInput(Strict):
     started_at: datetime
     success: bool
     control_ok: bool
+    control_revision: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     latency_ms: float | None = Field(default=None, ge=0, le=60000)
     error_class: (
         Literal[
@@ -99,7 +100,8 @@ class ResultInput(Strict):
     @field_validator("started_at")
     @classmethod
     def time(cls, value):
-        return validate_time(value)
+        validate_time(value)
+        return value
 
 
 class BatchInput(Strict):

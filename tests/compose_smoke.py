@@ -121,11 +121,20 @@ def main():
     found, _ = call("entities/users/1485")
     assert found["distinct_vps"] >= 2
     target, _ = call("probe-targets", {"vps_id": first["vps_id"], "address": "8.8.8.8", "port": 443})
+    call("agents/heartbeat", {"xray_running": True}, first["headers"])
+    call("settings", {"control_targets": [{"address": "1.1.1.1", "port": 443}]}, method="PATCH")
     probes = [
         credentials("probes", "smoke-cn-" + str(i), mainland=True, independence_group="smoke-net-" + str(i))
         for i in range(2)
     ]
     start = datetime.now(timezone.utc) - timedelta(minutes=10)
+    outside = credentials("probes", "smoke-outside", mainland=False, independence_group="outside-network")
+    config, _ = call("probes/config", headers=outside["headers"])
+    revision = config["control_revision"]
+    call("probes/results/batch", batch([
+        {"target_id": target["id"], "started_at": (start + timedelta(seconds=i * 300)).isoformat(),
+         "success": True, "control_ok": True, "control_revision": revision} for i in range(2)
+    ]), outside["headers"])
     for probe in probes:
         evidence = [
             {
@@ -133,6 +142,7 @@ def main():
                 "started_at": (start + timedelta(seconds=i * 300)).isoformat(),
                 "success": False,
                 "control_ok": True,
+                "control_revision": revision,
                 "error_class": "timeout",
             }
             for i in range(2)
@@ -148,7 +158,8 @@ def main():
             None,
         )
     )
-    wait_for(lambda: call("correlation/users?event_id=" + incident["id"])[0]["items"])
+    wait_for(lambda: call("correlation/users?event_id=" + incident["id"])[0]["items"], seconds=120)
+    wait_for(lambda: call("block-events/" + incident["id"] + "/investigation")[0]["status"] == "ready", seconds=120)
     for probe in probes:
         evidence = [
             {
@@ -156,6 +167,7 @@ def main():
                 "started_at": (start + timedelta(seconds=540 + i * 10)).isoformat(),
                 "success": True,
                 "control_ok": True,
+                "control_revision": revision,
                 "latency_ms": 12.0,
             }
             for i in range(2)

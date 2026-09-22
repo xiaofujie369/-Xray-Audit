@@ -6,7 +6,8 @@ from alembic import command
 from alembic.config import Config
 from app.analysis import calculate_score, correlate, transition
 from app.db import Base, now
-from app.models import VPS, BlockEvent, Correlation, Event, Identity, ProbeResult, Target
+from app.models import VPS, BlockEvent, Correlation, Event, Identity, ProbeResult, Setting, Target
+from app.settings import control_revision
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
@@ -23,7 +24,8 @@ def db(tmp_path):
 
 
 def setup_probes(db):
-    vps = VPS(name="vps")
+    vps = VPS(name="vps", health={"xray_running": True}, last_heartbeat_at=now())
+    db.add(Setting(key="control_targets", value=[{"address": "1.1.1.1", "port": 443}]))
     db.add(vps)
     db.flush()
     target = Target(vps_id=vps.id, address="8.8.8.8", port=443)
@@ -33,7 +35,11 @@ def setup_probes(db):
         for i in range(2)
     ]
     db.add_all(probes)
+    outside = Identity(name="outside", kind="probes", mainland=False,
+                       independence_group="outside", token_hash="outside")
+    db.add(outside)
     db.commit()
+    observations(db, target, outside, True, now() - timedelta(minutes=4))
     return vps, target, probes
 
 
@@ -45,6 +51,7 @@ def observations(db, target, probe, success, start, control=True, error="timeout
                 target_id=target.id,
                 success=success,
                 control_ok=control,
+                control_revision=control_revision([{"address": "1.1.1.1", "port": 443}]),
                 started_at=start + timedelta(seconds=i * 30),
                 error_class=None if success else error,
             )

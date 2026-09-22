@@ -1,5 +1,6 @@
 name: CI
 on:
+  workflow_dispatch:
   pull_request:
   push:
     branches: [main, 'codex/**']
@@ -14,7 +15,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -r audit-server/backend/requirements.txt requests pytest ruff httpx
-      - run: ruff check agent probe audit-server/backend sync/audit_bridge.py tests/test_audit_agent.py tests/test_audit_server.py tests/test_audit_analysis.py tests/test_xray_runtime.py
+      - run: ruff check agent probe audit-server/backend sync/audit_bridge.py tests/test_audit_agent.py tests/test_audit_server.py tests/test_audit_analysis.py tests/test_audit_v2.py tests/test_xray_runtime.py
       - run: python -m compileall -q agent probe sync audit-server/backend
       - name: Official pinned Xray
         run: |

@@ -46,13 +46,19 @@ services:
       retries: 3
   audit-worker:
     <<: *backend
-    command: ["celery", "-A", "app.worker:celery", "worker", "--loglevel=WARNING", "--concurrency=2"]
+    command: ["celery", "-A", "app.worker:celery", "worker", "--queues=celery", "--loglevel=WARNING", "--concurrency=2"]
     depends_on:
       audit-migrate:
         condition: service_completed_successfully
   audit-scheduler:
     <<: *backend
     command: ["celery", "-A", "app.worker:celery", "beat", "--loglevel=WARNING", "--schedule=/tmp/celerybeat"]
+    depends_on:
+      audit-migrate:
+        condition: service_completed_successfully
+  audit-ai-worker:
+    <<: *backend
+    command: ["celery", "-A", "app.worker:celery", "worker", "--queues=ai", "--loglevel=WARNING", "--concurrency=1"]
     depends_on:
       audit-migrate:
         condition: service_completed_successfully

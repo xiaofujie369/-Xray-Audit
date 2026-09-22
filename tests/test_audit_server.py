@@ -89,6 +89,21 @@ def test_enrollment_is_one_use_and_scoped(client):
     assert client.get("/api/v1/agents/config", headers=identity["headers"]).status_code == 200
 
 
+def test_ai_configuration_requires_admin_and_never_returns_api_key(client):
+    assert client.get("/api/v1/ai/settings").status_code == 401
+    login(client)
+    with patch.dict("os.environ", {"AI_API_URL": "https://example.test/chat/completions", "AI_API_KEY": "private-test-key", "AI_MODEL": "test-model"}):
+        response = client.patch("/api/v1/ai/settings", json={"enabled": True, "daily_request_limit": 2})
+        assert response.status_code == 200
+        assert response.json()["configured"]
+        assert "private-test-key" not in response.text
+        client.post("/api/v1/admin-users", json={"email": "viewer@example.test", "password": "viewer-password-123456", "role": "viewer"})
+        result = client.post("/api/v1/auth/login", json={"email": "viewer@example.test", "password": "viewer-password-123456"})
+        client.headers["X-CSRF-Token"] = result.json()["csrf_token"]
+        assert client.get("/api/v1/ai/settings").status_code == 200
+        assert client.patch("/api/v1/ai/settings", json={"enabled": False}).status_code == 403
+
+
 def test_rotation_preserves_dedupe_and_invalidates_old_token(client):
     _, identity = enroll(client)
     payload = batch()

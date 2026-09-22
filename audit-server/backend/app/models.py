@@ -174,6 +174,7 @@ class ProbeResult(Base):
     started_at = Column(DateTime(timezone=True), nullable=False, index=True)
     success = Column(Boolean, nullable=False)
     control_ok = Column(Boolean, nullable=False)
+    control_revision = Column(String(64))
     latency_ms = Column(Float)
     error_class = Column(String(32))
     __table_args__ = (
@@ -201,6 +202,7 @@ class BlockEvent(Base):
     probe_count = Column(Integer, nullable=False, default=0)
     evidence = Column(DOCUMENT, nullable=False, default=list)
     notes = Column(String(2000), default="")
+    investigation_dirty = Column(Boolean, default=True, nullable=False, server_default="true")
 
 
 class Correlation(Base):
@@ -222,6 +224,41 @@ class Setting(Base):
     __tablename__ = "settings"
     key = Column(String(80), primary_key=True)
     value = Column(DOCUMENT, nullable=False)
+
+
+class InvestigationSnapshot(Base):
+    __tablename__ = "investigation_snapshots"
+    id = Column(String(36), primary_key=True, default=uid)
+    block_event_id = Column(ForeignKey("block_events.id", ondelete="CASCADE"), nullable=False, index=True)
+    content_hash = Column(String(64), nullable=False)
+    payload = Column(DOCUMENT, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=now, nullable=False)
+    __table_args__ = (UniqueConstraint("block_event_id", "content_hash"),)
+
+
+class HourlyBaseline(Base):
+    __tablename__ = "hourly_baselines"
+    vps_id = Column(ForeignKey("vps.id"), primary_key=True)
+    hour_start = Column(DateTime(timezone=True), primary_key=True, index=True)
+    entity_type = Column(String(20), primary_key=True)
+    entity_hash = Column(String(64), primary_key=True)
+    connections = Column(BigInteger, nullable=False)
+
+
+class AIReport(Base):
+    __tablename__ = "ai_reports"
+    id = Column(String(36), primary_key=True, default=uid)
+    snapshot_id = Column(ForeignKey("investigation_snapshots.id", ondelete="CASCADE"), nullable=False, unique=True)
+    status = Column(String(16), default="pending", nullable=False, index=True)
+    model = Column(String(128), nullable=False, default="")
+    result = Column(DOCUMENT, nullable=False, default=dict)
+    error_code = Column(String(64))
+    attempts = Column(Integer, nullable=False, default=0)
+    available_at = Column(DateTime(timezone=True), default=now, nullable=False, index=True)
+    lease_token = Column(String(36))
+    created_at = Column(DateTime(timezone=True), default=now, nullable=False)
+    finished_at = Column(DateTime(timezone=True))
+    last_attempt_at = Column(DateTime(timezone=True))
 
 
 class Job(Base):

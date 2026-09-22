@@ -7,10 +7,13 @@ from datetime import timedelta
 from urllib.request import Request, urlopen
 
 from celery import Celery
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select, tuple_
 
+from .ai_review import run_once
 from .analysis import correlate, transition
+from .baseline import backfill_batch
 from .db import Session, now, utc
+from .investigation import capture
 from .models import (
     VPS,
     AuditLog,
@@ -18,6 +21,7 @@ from .models import (
     BlockEvent,
     Correlation,
     Event,
+    HourlyBaseline,
     Identity,
     Job,
     LoginSession,
@@ -34,12 +38,43 @@ celery.conf.update(
     result_serializer="json",
     worker_prefetch_multiplier=1,
     task_acks_late=True,
+    task_routes={"audit.ai_review": {"queue": "ai"}},
     beat_schedule={
         "drain": {"task": "audit.drain", "schedule": 5.0},
         "retention": {"task": "audit.retention", "schedule": 60.0},
         "monitor": {"task": "audit.monitor", "schedule": 60.0},
+        "investigations": {"task": "audit.investigations", "schedule": 60.0},
+        "ai-review": {"task": "audit.ai_review", "schedule": 60.0, "options": {"queue": "ai", "expires": 55}},
+        "baseline-backfill": {"task": "audit.baseline_backfill", "schedule": 60.0},
     },
 )
+
+
+@celery.task(name="audit.ai_review", soft_time_limit=50, time_limit=60)
+def ai_review():
+    run_once()
+
+
+@celery.task(name="audit.baseline_backfill")
+def baseline_backfill():
+    deadline = time.monotonic() + 20
+    for _ in range(50):
+        with Session() as db:
+            more = backfill_batch(db)
+            db.commit()
+        if not more or time.monotonic() >= deadline:
+            return
+
+
+@celery.task(name="audit.investigations")
+def investigations():
+    with Session() as db:
+        for incident in db.scalars(select(BlockEvent).where(
+            BlockEvent.investigation_dirty.is_(True)
+        ).order_by(BlockEvent.detected_at).with_for_update(skip_locked=True).limit(100)):
+            db.add(Job(kind="correlate", payload={"id": incident.id}))
+            incident.investigation_dirty = False
+        db.commit()
 
 
 def notify(payload):
@@ -82,6 +117,9 @@ def drain():
                     transition(db, job.payload["id"])
                 elif job.kind == "correlate":
                     correlate(db, job.payload["id"])
+                    capture(db, job.payload["id"])
+                elif job.kind == "snapshot":
+                    capture(db, job.payload["id"])
                 elif job.kind == "notify":
                     notify(job.payload)
                 else:
@@ -116,6 +154,14 @@ def retention():
             (AuditLog, AuditLog.created_at, config["admin_log_retention_days"]),
         ]
         for model, timestamp, days in specs:
+            if model is Event:
+                checkpoint = db.get(Setting, "baseline_backfill")
+                if checkpoint and checkpoint.value["cursor"] < checkpoint.value["max_id"]:
+                    continue
+                if db.scalar(select(BlockEvent.id).where(BlockEvent.investigation_dirty.is_(True)).limit(1)):
+                    continue
+                if db.scalar(select(Job.id).where(Job.kind == "correlate").limit(1)):
+                    continue
             # Bounded deletes avoid huge locks and transactions.
             for _ in range(100):
                 ids = (
@@ -130,19 +176,26 @@ def retention():
                     break
         expired = (
             select(BlockEvent.id)
-            .where(BlockEvent.detected_at < now() - timedelta(days=config["incident_retention_days"]))
+            .where(func.coalesce(BlockEvent.recovered_at, BlockEvent.detected_at) < now() - timedelta(days=config["incident_retention_days"]),
+                   BlockEvent.state.in_(["recovered", "false_positive"]))
             .limit(1000)
         )
         ids = list(db.scalars(expired))
         correlation_expired = (
             select(Correlation.id)
             .join(BlockEvent, Correlation.block_event_id == BlockEvent.id)
-            .where(BlockEvent.detected_at < now() - timedelta(days=config["correlation_retention_days"]))
+            .where(func.coalesce(BlockEvent.recovered_at, BlockEvent.detected_at) < now() - timedelta(days=config["correlation_retention_days"]),
+                   BlockEvent.state.in_(["recovered", "false_positive"]))
             .limit(10000)
         )
         db.execute(delete(Correlation).where(Correlation.id.in_(correlation_expired)))
         db.execute(delete(Correlation).where(Correlation.block_event_id.in_(ids)))
         db.execute(delete(BlockEvent).where(BlockEvent.id.in_(ids)))
+        keys = [HourlyBaseline.vps_id, HourlyBaseline.hour_start, HourlyBaseline.entity_type, HourlyBaseline.entity_hash]
+        expired_hours = select(*keys).where(
+            HourlyBaseline.hour_start < now() - timedelta(days=config["baseline_retention_days"])
+        ).order_by(HourlyBaseline.hour_start).limit(10000)
+        db.execute(delete(HourlyBaseline).where(tuple_(*keys).in_(expired_hours)))
         # Dedupe horizon must be greater than maximum ingest age, not event retention.
         db.execute(delete(Batch).where(Batch.created_at < now() - timedelta(days=100)))
         db.execute(delete(LoginSession).where(LoginSession.expires_at < now()))

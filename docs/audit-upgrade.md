@@ -1,5 +1,7 @@
 # Upgrade, rollback and removal
 
+For central V1 → V2, Probe updates, seven-day detail retention and opt-in AI, follow [the V2 guide](audit-v2.md). V2 provides migration 0003 and an independent AI worker; stop every central writer before migration, as `update-central.sh` does.
+
 Use an extracted release or local checkout from the repository you control. `bash update.sh` validates staged Python/shell files and the running Xray configuration, backs up sync files, audit config/code and a consistent SQLite snapshot, then updates code. Identity and live spool are preserved. Existing proxy configuration is not rewritten by the update script. Changed sync/report scripts restart those services; an Audit-only update does not restart Xray.
 
 Failure restores backed-up sync code and aliases before restarting services. Keep `/opt/xray-sync/backup/update-*` until verification is complete. The rollback backup contains credentials: keep mode 0700 and do not upload it to Git.

@@ -88,13 +88,17 @@ def main():
                     remote = cached["value"]
                 next_probe = time.monotonic() + max(30, remote["interval"])
                 controls = remote["controls"]
-                control_ok = all(check(target)["success"] for target in controls) if controls else True
                 with ThreadPoolExecutor(max_workers=8) as pool:
-                    results = [
-                        dict(result, control_ok=control_ok) for result in pool.map(check, remote["targets"])
-                    ]
-                if results:
-                    spool.commit("results", results)
+                    # Refresh controls in bounded waves, not once before a long target sweep.
+                    for offset in range(0, len(remote["targets"]), 32):
+                        if stopped.is_set():
+                            break
+                        control_ok = all(result["success"] for result in pool.map(check, controls)) if controls else True
+                        results = [dict(result, control_ok=control_ok,
+                                        control_revision=remote.get("control_revision"))
+                                   for result in pool.map(check, remote["targets"][offset:offset + 32])]
+                        if results:
+                            spool.commit("results", results)
         except Exception:
             # Spool survives central outages. Never print request headers or raw errors.
             stopped.wait(10)

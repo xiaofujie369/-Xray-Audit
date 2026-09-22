@@ -1,6 +1,12 @@
+import hashlib
+import json
 import os
 
 from .models import Setting
+
+
+def control_revision(controls):
+    return hashlib.sha256(json.dumps(controls, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 DEFAULTS = {
     "lookback_minutes": 60,
@@ -8,10 +14,11 @@ DEFAULTS = {
     "recover_consecutive": 2,
     "min_distinct_probes": 2,
     "probe_interval_seconds": 300,
-    "event_retention_days": 30,
-    "traffic_retention_days": 90,
-    "incident_retention_days": 365,
-    "correlation_retention_days": 365,
+    "event_retention_days": 7,
+    "traffic_retention_days": 7,
+    "incident_retention_days": 90,
+    "correlation_retention_days": 90,
+    "baseline_retention_days": 90,
     "admin_log_retention_days": 365,
     "domain_ignore": [],
     "timezone": "browser",
